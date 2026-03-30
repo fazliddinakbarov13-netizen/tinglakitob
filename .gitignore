@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.env
+bot_error.log
+debug_chunks.txt
+*.mp3
+tinglakitob.db
+last_errors.txt
+run_log.txt
+run_cmd_log.txt
+install.log
+model_results.txt
+models.json
+test_*.py
