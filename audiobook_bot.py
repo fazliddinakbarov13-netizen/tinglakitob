@@ -9,8 +9,7 @@ import hashlib
 from dotenv import load_dotenv
 
 import fitz  # PyMuPDF
-from google import genai
-from google.genai import types
+import requests as http_requests
 import edge_tts
 from langdetect import detect
 
@@ -30,7 +29,8 @@ import db  # SQLite modul
 # ── Konfiguratsiya ────────────────────────────────────────────────
 load_dotenv()
 
-gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+OPENROUTER_MODEL = "google/gemini-2.5-flash"
 
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 DAILY_LIMIT = int(os.getenv("DAILY_LIMIT", "1"))
@@ -279,41 +279,54 @@ def text_hash(text: str) -> str:
     return hashlib.md5(text[:500].encode()).hexdigest()[:12]
 
 
-# ── Gemini tarjima ────────────────────────────────────────────────
+# ── OpenRouter orqali Gemini tarjima ──────────────────────────────
 
 def sync_translate(prompt: str) -> str:
-    """Gemini API orqali tarjima."""
+    """OpenRouter API orqali Gemini bilan tarjima."""
     retries = 5
     for attempt in range(retries):
         try:
-            response = gemini_client.models.generate_content(
-                model='gemini-2.5-flash',
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=0.3,
-                    thinking_config=types.ThinkingConfig(thinking_budget=0),
-                    safety_settings=[
-                        types.SafetySetting(category='HARM_CATEGORY_HARASSMENT', threshold='BLOCK_NONE'),
-                        types.SafetySetting(category='HARM_CATEGORY_HATE_SPEECH', threshold='BLOCK_NONE'),
-                        types.SafetySetting(category='HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold='BLOCK_NONE'),
-                        types.SafetySetting(category='HARM_CATEGORY_DANGEROUS_CONTENT', threshold='BLOCK_NONE'),
-                    ]
-                )
+            resp = http_requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": OPENROUTER_MODEL,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.3,
+                },
+                timeout=60
             )
-            if response and response.text:
-                return response.text.strip()
-            return ""
-        except Exception as e:
-            err_str = str(e)
-            if "429" in err_str or "quota" in err_str.lower() or "Resource" in err_str:
+            if resp.status_code == 200:
+                data = resp.json()
+                text = data["choices"][0]["message"]["content"]
+                return text.strip() if text else ""
+            elif resp.status_code == 429:
                 wait_time = min(20 * (attempt + 1), 60)
-                logging.warning(f"Gemini API limit ({attempt+1}/{retries}): {wait_time}s kutilmoqda...")
+                logging.warning(f"OpenRouter rate limit ({attempt+1}/{retries}): {wait_time}s kutilmoqda...")
                 time.sleep(wait_time)
-            elif attempt < retries - 1:
-                logging.warning(f"Gemini xato ({attempt+1}/{retries}): {e}. 5s kutilmoqda...")
+            else:
+                err_msg = resp.text[:200]
+                logging.warning(f"OpenRouter xato ({attempt+1}/{retries}): {resp.status_code} - {err_msg}")
+                if attempt < retries - 1:
+                    time.sleep(5)
+                else:
+                    raise Exception(f"OpenRouter API xato: {resp.status_code} - {err_msg}")
+        except http_requests.exceptions.Timeout:
+            logging.warning(f"OpenRouter timeout ({attempt+1}/{retries}). 10s kutilmoqda...")
+            if attempt < retries - 1:
+                time.sleep(10)
+            else:
+                raise Exception("OpenRouter API timeout")
+        except Exception as e:
+            if attempt < retries - 1:
+                logging.warning(f"OpenRouter xato ({attempt+1}/{retries}): {e}. 5s kutilmoqda...")
                 time.sleep(5)
             else:
                 raise e
+    return ""
 
 
 async def check_channel_subscription(user_id: int, bot) -> bool:
@@ -1445,7 +1458,7 @@ def main():
     # Global xato handler
     app.add_error_handler(error_handler)
 
-    print("Bot ishga tushdi! ✅")
+    print("Bot ishga tushdi!")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
