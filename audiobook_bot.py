@@ -960,7 +960,7 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🎁 Kunlik bepul: {DAILY_LIMIT} ta\n"
                 f"💎 Bonus limitingiz: {bonus} ta\n\n"
                 "💰 Qo'shimcha limit olish uchun admin bilan bog'laning:\n"
-                "👉 @tinglakitob\_admin",
+                "👉 @tinglakitob\\_admin",
                 parse_mode="Markdown"
             )
             return
