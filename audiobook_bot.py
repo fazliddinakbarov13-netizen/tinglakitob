@@ -106,6 +106,34 @@ LANG_FLAGS = {
 MAX_TTS_CHARS = 500
 TTS_TIMEOUT = 30
 
+# ── Kayfiyat (mood) ovoz sozlamalari ──────────────────────────────
+
+MOOD_PROSODY = {
+    'quvnoq':     {'rate_adj': 10,  'pitch': '+5Hz',  'volume': '+5%'},
+    'gamgin':     {'rate_adj': -15, 'pitch': '-5Hz',  'volume': '-5%'},
+    'hayajonli':  {'rate_adj': 15,  'pitch': '+8Hz',  'volume': '+10%'},
+    'jiddiy':     {'rate_adj': -5,  'pitch': '-3Hz',  'volume': '+0%'},
+    'romantik':   {'rate_adj': -10, 'pitch': '+3Hz',  'volume': '-5%'},
+    'qorqinchli': {'rate_adj': -10, 'pitch': '-8Hz',  'volume': '+5%'},
+    'savol':      {'rate_adj': -3,  'pitch': '+6Hz',  'volume': '+0%'},
+    'oddiy':      {'rate_adj': 0,   'pitch': '+0Hz',  'volume': '+0%'},
+}
+
+MOOD_EMOJIS = {
+    'quvnoq': '😊', 'gamgin': '😢', 'hayajonli': '😱',
+    'jiddiy': '😐', 'romantik': '💕', 'qorqinchli': '👻',
+    'savol': '❓', 'oddiy': '📖'
+}
+
+
+def combine_rate(base_rate: str, mood_adj: int) -> str:
+    """Foydalanuvchi tezligi + kayfiyat tezligini birlashtiradi."""
+    base = int(base_rate.replace('%', '').replace('+', ''))
+    total = base + mood_adj
+    sign = '+' if total >= 0 else ''
+    return f"{sign}{total}%"
+
+
 # ── Yordamchi funksiyalar ─────────────────────────────────────────
 
 
@@ -141,11 +169,11 @@ def split_text_for_tts(text: str, max_chars: int = MAX_TTS_CHARS) -> list:
     return chunks
 
 
-async def tts_one_chunk(text: str, voice: str, path: str, retries: int = 5, rate: str = "+0%"):
+async def tts_one_chunk(text: str, voice: str, path: str, retries: int = 5, rate: str = "+0%", pitch: str = "+0Hz", volume: str = "+0%"):
     """Bitta kichik matn qismini audioga aylantiradi (timeout + retry)."""
     for attempt in range(retries):
         try:
-            communicate = edge_tts.Communicate(text, voice, rate=rate)
+            communicate = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch, volume=volume)
             await asyncio.wait_for(communicate.save(path), timeout=TTS_TIMEOUT)
             if os.path.exists(path) and os.path.getsize(path) > 100:
                 return True
@@ -171,24 +199,127 @@ async def tts_one_chunk(text: str, voice: str, path: str, retries: int = 5, rate
                 raise e
 
 
-async def generate_audio_safe(text: str, voice: str, output_path: str, rate: str = "+0%"):
+async def generate_audio_safe(text: str, voice: str, output_path: str, rate: str = "+0%", pitch: str = "+0Hz", volume: str = "+0%"):
     """Edge-TTS orqali xavfsiz audio yaratish (sub-chunking bilan)."""
     sub_chunks = split_text_for_tts(text)
 
     if len(sub_chunks) == 1:
-        await tts_one_chunk(sub_chunks[0], voice, output_path, rate=rate)
+        await tts_one_chunk(sub_chunks[0], voice, output_path, rate=rate, pitch=pitch, volume=volume)
     else:
         temp_files = []
         parent_dir = os.path.dirname(output_path)
 
         for ci, chunk in enumerate(sub_chunks):
             chunk_path = os.path.join(parent_dir, f"_sub_{ci}.mp3")
-            await tts_one_chunk(chunk, voice, chunk_path, rate=rate)
+            await tts_one_chunk(chunk, voice, chunk_path, rate=rate, pitch=pitch, volume=volume)
             temp_files.append(chunk_path)
             await asyncio.sleep(2)
 
         with open(output_path, 'wb') as outfile:
             for tf in temp_files:
+                with open(tf, 'rb') as infile:
+                    outfile.write(infile.read())
+                try:
+                    os.remove(tf)
+                except Exception:
+                    pass
+
+
+def analyze_sentence_moods(text: str, base_mood: str) -> list:
+    """Matnni gaplarga ajratib, har biriga kayfiyat belgilaydi (heuristic)."""
+    sentences = re.split(r'(?<=[.!?…])\s+', text.strip())
+    result = []
+
+    gamgin_words = ['sekin', "og'ri", 'yosh', 'ayril', "yo'q", 'ketdi', 'yig\'la', 'qayg\'u', 'g\'am']
+    quvnoq_words = ['quvon', 'baxt', 'yasha', 'ajoyib', "zo'r", 'kuldi', 'sevgi', 'xursand']
+
+    for sent in sentences:
+        sent = sent.strip()
+        if not sent or len(sent) < 3:
+            continue
+
+        sent_lower = sent.lower()
+
+        if sent.endswith('!'):
+            if any(w in sent_lower for w in quvnoq_words):
+                mood = 'quvnoq'
+            else:
+                mood = 'hayajonli'
+        elif sent.endswith('?'):
+            mood = 'savol'
+        elif len(sent.split()) <= 3:
+            mood = 'jiddiy'
+        elif any(w in sent_lower for w in gamgin_words):
+            mood = 'gamgin'
+        elif any(w in sent_lower for w in quvnoq_words):
+            mood = 'quvnoq'
+        else:
+            mood = base_mood
+
+        result.append((sent, mood))
+
+    return result if result else [(text, base_mood)]
+
+
+# Kayfiyat o'tish "masofasi" — katta raqam = katta o'zgarish
+MOOD_INTENSITY = {
+    'gamgin': -3, 'qorqinchli': -2, 'jiddiy': -1,
+    'oddiy': 0, 'savol': 1,
+    'romantik': 2, 'quvnoq': 3, 'hayajonli': 4
+}
+
+
+async def generate_audio_per_sentence(text: str, voice: str, output_path: str,
+                                      base_rate: str = "+0%", base_mood: str = "oddiy"):
+    """Har bir gapni alohida kayfiyat bilan audio yaratadi va birlashtiradi.
+    Kayfiyat keskin o'zgarganda tabiiy pauza qo'shadi."""
+    sentence_moods = analyze_sentence_moods(text, base_mood)
+
+    if len(sentence_moods) <= 1:
+        mood_s = MOOD_PROSODY.get(base_mood, MOOD_PROSODY['oddiy'])
+        rate = combine_rate(base_rate, mood_s['rate_adj'])
+        await generate_audio_safe(text, voice, output_path, rate=rate,
+                                  pitch=mood_s['pitch'], volume=mood_s['volume'])
+        return
+
+    temp_files = []
+    parent_dir = os.path.dirname(output_path)
+    prev_mood = None
+
+    for si, (sentence, mood) in enumerate(sentence_moods):
+        # Kayfiyat o'zgarganda pauza qo'shish
+        if prev_mood is not None:
+            prev_val = MOOD_INTENSITY.get(prev_mood, 0)
+            curr_val = MOOD_INTENSITY.get(mood, 0)
+            mood_distance = abs(curr_val - prev_val)
+
+            if mood_distance >= 2:
+                # Kayfiyat o'zgarishi — tabiiy pauza qo'shish
+                # Qisqa gapcha bilan pauza yaratish
+                pause_path = os.path.join(parent_dir, f"_pause_{si}.mp3")
+                pause_text = "hmm" if mood_distance >= 4 else "ha"
+                try:
+                    await generate_audio_safe(pause_text, voice, pause_path,
+                                              rate="-50%", pitch="-10Hz", volume="-90%")
+                    temp_files.append(pause_path)
+                except Exception:
+                    pass
+
+        prev_mood = mood
+
+        sent_path = os.path.join(parent_dir, f"_sent_{si}.mp3")
+        mood_s = MOOD_PROSODY.get(mood, MOOD_PROSODY['oddiy'])
+        rate = combine_rate(base_rate, mood_s['rate_adj'])
+
+        await generate_audio_safe(sentence, voice, sent_path, rate=rate,
+                                  pitch=mood_s['pitch'], volume=mood_s['volume'])
+        temp_files.append(sent_path)
+        await asyncio.sleep(0.3)
+
+    # Barcha gaplarni birlashtirish
+    with open(output_path, 'wb') as outfile:
+        for tf in temp_files:
+            if os.path.exists(tf):
                 with open(tf, 'rb') as infile:
                     outfile.write(infile.read())
                 try:
@@ -1146,16 +1277,73 @@ async def _process_audio(query, context, text, detected_lang, target_lang,
                 "If translating to Uzbek, ALWAYS use the official Uzbek Latin alphabet. "
             ) if target_lang == 'uz' else ""
 
-            async def translate_one(chunk_content: str) -> str:
-                prompt = (
-                    f"Translate the following text to {target_lang_name} language. {uz_instr}"
-                    "IMPORTANT: Do NOT summarize the text. Translate it word-for-word, keeping every single sentence. "
-                    "If the input text is ALREADY in the target language, do NOT translate or summarize it, just return the EXACT original text as is. "
-                    "Preserve the literary style, tone, and feel of the book. "
-                    f"Return ONLY the final translated text, without any explanations.\\n\\n{chunk_content}"
+            async def process_one(chunk_content: str, need_trans: bool) -> tuple:
+                """Matnni TTS uchun tayyorlaydi: tarjima + normalizatsiya + diktor uslubi + kayfiyat."""
+
+                narrator_instr = (
+                    "IMPORTANT - Format text as a PROFESSIONAL AUDIOBOOK NARRATOR would read it:\n"
+                    "- Add commas at natural breathing/pause points in long sentences\n"
+                    "- Use '...' (ellipsis) before dramatic or surprising moments\n"
+                    "- Keep exclamation marks for emotional emphasis\n"
+                    "- Break very long sentences into shorter, readable ones\n"
+                    "- Do NOT add stage directions or notes like '(pause)' or '(whisper)'\n"
+                    "- The result should read naturally when spoken aloud\n\n"
                 )
+
+                if need_trans:
+                    prompt = (
+                        f"You are a professional audiobook narrator preparing text for TTS. Do these tasks:\n\n"
+                        f"1. TRANSLATE to {target_lang_name}. {uz_instr}"
+                        f"Translate word-for-word, keep EVERY sentence. Preserve literary style and emotion.\n\n"
+                        f"2. NORMALIZE numbers: Convert ALL numbers, dates, years, percentages, "
+                        f"currencies, times to WRITTEN WORDS in {target_lang_name}. "
+                        f"Examples: '1997' → 'ming to'qqiz yuz to'qson yetti', "
+                        f"'25%' → 'yigirma besh foiz', '10:30' → 'o'n yarim'\n\n"
+                        f"3. NARRATOR FORMAT:\n{narrator_instr}"
+                        f"4. MOOD: Choose ONE mood for this text: "
+                        f"quvnoq, gamgin, hayajonli, jiddiy, romantik, qorqinchli, oddiy\n\n"
+                        f"Return EXACTLY in this format:\n"
+                        f"MOOD: [one word]\n"
+                        f"TEXT:\n[translated, normalized, narrator-formatted text]\n\n"
+                        f"Input:\n{chunk_content}"
+                    )
+                else:
+                    prompt = (
+                        f"You are a professional audiobook narrator preparing text for TTS in {target_lang_name}. Do these tasks:\n\n"
+                        f"1. NORMALIZE: Convert ALL numbers, dates, years, percentages, currencies, "
+                        f"times to WRITTEN WORDS in {target_lang_name}. "
+                        f"Examples: '1997' → 'ming to'qqiz yuz to'qson yetti', "
+                        f"'25%' → 'yigirma besh foiz', '10:30' → 'o'n yarim'. "
+                        f"Keep ALL original text, do NOT summarize or remove anything.\n\n"
+                        f"2. NARRATOR FORMAT:\n{narrator_instr}"
+                        f"3. MOOD: Choose ONE mood: quvnoq, gamgin, hayajonli, jiddiy, romantik, qorqinchli, oddiy\n\n"
+                        f"Return EXACTLY in this format:\n"
+                        f"MOOD: [one word]\n"
+                        f"TEXT:\n[normalized, narrator-formatted text]\n\n"
+                        f"Input:\n{chunk_content}"
+                    )
+
                 result = await asyncio.to_thread(sync_translate, prompt)
-                return result
+
+                mood = 'oddiy'
+                processed_text = chunk_content
+
+                if result and 'MOOD:' in result and 'TEXT:' in result:
+                    try:
+                        mood_part = result.split('TEXT:')[0]
+                        mood_val = mood_part.replace('MOOD:', '').strip().lower().split()[0]
+                        if mood_val in MOOD_PROSODY:
+                            mood = mood_val
+                        text_part = result.split('TEXT:', 1)[1].strip()
+                        if len(text_part) > 20:
+                            processed_text = text_part
+                    except Exception:
+                        pass
+                elif result and len(result.strip()) > 20:
+                    processed_text = result.strip()
+
+                logging.info(f"Chunk kayfiyati: {mood}")
+                return processed_text, mood
 
             with tempfile.TemporaryDirectory() as tmpdir:
                 for batch_start in range(start_from, total_parts, BATCH_SIZE):
@@ -1188,41 +1376,50 @@ async def _process_audio(query, context, text, detected_lang, target_lang,
 
                     range_str = f"{batch_indices[0]}-{batch_indices[-1]}" if len(batch_indices) > 1 else str(batch_indices[0])
 
-                    if need_translation:
-                        status_text = f"⚡ Tarjima... {bar} {perc}% — {range_str}/{total_parts}"
-                        try:
-                            await progress_msg.edit_text(status_text, reply_markup=cancel_keyboard)
-                        except Exception:
-                            pass
+                    # Matnni qayta ishlash: tarjima + normalizatsiya + kayfiyat
+                    status_emoji = "⚡ Tarjima va tayyorlash" if need_translation else "🎭 Matn tayyorlanmoqda"
+                    status_text = f"{status_emoji}... {bar} {perc}% — {range_str}/{total_parts}"
+                    try:
+                        await progress_msg.edit_text(status_text, reply_markup=cancel_keyboard)
+                    except Exception:
+                        pass
 
-                        tasks = [translate_one(chunk_content) for _, chunk_content in batch]
-                        try:
-                            results = await asyncio.gather(*tasks, return_exceptions=True)
-                        except Exception as e:
-                            logging.error(f"Batch tarjima xatosi: {e}")
-                            results = [e] * len(batch)
+                    tasks = [process_one(chunk_content, need_translation) for _, chunk_content in batch]
+                    try:
+                        results = await asyncio.gather(*tasks, return_exceptions=True)
+                    except Exception as e:
+                        logging.error(f"Batch qayta ishlash xatosi: {e}")
+                        results = [e] * len(batch)
 
-                        translated_texts = []
-                        for i, result in enumerate(results):
-                            idx = batch_indices[i]
-                            if isinstance(result, Exception):
-                                logging.error(f"Tarjima xatosi ({idx}-qism): {result}")
-                                await context.bot.send_message(
-                                    chat_id=query.message.chat_id,
-                                    text=f"🔴 Tarjimada xato ({idx}-qism). O'tkazib yuborilmoqda..."
-                                )
-                                translated_texts.append(None)
-                            elif result and len(result.strip()) > 20:
-                                translated_texts.append(result)
+                    processed_texts = []
+                    chunk_moods = []
+                    for i, result in enumerate(results):
+                        idx = batch_indices[i]
+                        if isinstance(result, Exception):
+                            logging.error(f"Qayta ishlash xatosi ({idx}-qism): {result}")
+                            await context.bot.send_message(
+                                chat_id=query.message.chat_id,
+                                text=f"🔴 Xato ({idx}-qism). O'tkazib yuborilmoqda..."
+                            )
+                            processed_texts.append(None)
+                            chunk_moods.append('oddiy')
+                        elif isinstance(result, tuple) and len(result) == 2:
+                            proc_text, mood = result
+                            if proc_text and len(proc_text.strip()) > 20:
+                                processed_texts.append(proc_text)
                             else:
-                                translated_texts.append(batch[i][1])
-                    else:
-                        translated_texts = [chunk_content for _, chunk_content in batch]
+                                processed_texts.append(batch[i][1])
+                            chunk_moods.append(mood)
+                        else:
+                            processed_texts.append(batch[i][1])
+                            chunk_moods.append('oddiy')
 
                     # ── AUDIO yaratish va yuborish ──
                     for i, (chunk_title, chunk_content) in enumerate(batch):
                         idx = batch_indices[i]
-                        final_text = translated_texts[i]
+                        final_text = processed_texts[i]
+                        chunk_mood = chunk_moods[i]
+                        mood_settings = MOOD_PROSODY.get(chunk_mood, MOOD_PROSODY['oddiy'])
 
                         if final_text is None:
                             error_count += 1
@@ -1263,7 +1460,13 @@ async def _process_audio(query, context, text, detected_lang, target_lang,
                             else:
                                 intro_path = None
 
-                            await generate_audio_safe(final_text, voice, audio_path, rate=speed_rate)
+                            # Kayfiyatga qarab ovoz sozlamalari (butun chunk uchun)
+                            final_rate = combine_rate(speed_rate, mood_settings['rate_adj'])
+                            final_pitch = mood_settings['pitch']
+                            final_volume = mood_settings['volume']
+
+                            await generate_audio_safe(final_text, voice, audio_path,
+                                                      rate=final_rate, pitch=final_pitch, volume=final_volume)
 
                             # Introni birinchi qism boshiga qo'shish
                             if intro_path and os.path.exists(intro_path) and idx == 1:
@@ -1284,10 +1487,11 @@ async def _process_audio(query, context, text, detected_lang, target_lang,
 
                             safe_chunk_title = sanitize_for_markdown(chunk_title)
                             voice_label = "👩 Ayol" if voice_type == "ayol" else "👨 Erkak"
+                            mood_emoji = MOOD_EMOJIS.get(chunk_mood, '📖')
                             caption = (
                                 f"📖 {file_name}\n"
                                 f"📌 Qism: {idx}/{total_parts} - {safe_chunk_title}\n"
-                                f"🌐 Til: {target_emoji} | 🗣 {voice_label}"
+                                f"🌐 Til: {target_emoji} | 🗣 {voice_label} | {mood_emoji} {chunk_mood.capitalize()}"
                             )
 
                             upload_success = False
