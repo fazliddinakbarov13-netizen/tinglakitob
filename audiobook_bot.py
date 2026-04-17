@@ -725,6 +725,88 @@ async def limit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
 
+# ── /elon buyrug'i (admin — barcha foydalanuvchilarga xabar) ─────
+
+async def elon_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin barcha foydalanuvchilarga xabar yuboradi (broadcast).
+    Ishlatilishi: /elon Xabar matni...
+    """
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ Bu buyruq faqat admin uchun.")
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "📢 *E'lon yuborish*\n\n"
+            "Ishlatilishi:\n"
+            "`/elon Bot yangilandi! Yangi funksiyalar qo'shildi.`\n\n"
+            "Bu xabar barcha foydalanuvchilarga yuboriladi.",
+            parse_mode="Markdown"
+        )
+        return
+
+    # Xabar matnini yig'ish (barcha args larni birlashtirish)
+    broadcast_text = " ".join(context.args)
+
+    all_users = db.get_all_user_ids()
+    total = len(all_users)
+
+    if total == 0:
+        await update.message.reply_text("⚠️ Hech qanday foydalanuvchi topilmadi.")
+        return
+
+    progress_msg = await update.message.reply_text(
+        f"📢 Xabar yuborilmoqda...\n"
+        f"👥 Jami: {total} ta foydalanuvchi"
+    )
+
+    success = 0
+    failed = 0
+    blocked = 0
+
+    for i, uid in enumerate(all_users):
+        try:
+            await context.bot.send_message(
+                chat_id=uid,
+                text=f"📢 *TinglaKitob — E'lon*\n\n{broadcast_text}",
+                parse_mode="Markdown"
+            )
+            success += 1
+        except Exception as e:
+            err_str = str(e).lower()
+            if "blocked" in err_str or "deactivated" in err_str:
+                blocked += 1
+            else:
+                failed += 1
+
+        # Har 20 ta foydalanuvchidan keyin progress yangilash
+        if (i + 1) % 20 == 0:
+            try:
+                await progress_msg.edit_text(
+                    f"📢 Yuborilmoqda... {i+1}/{total}\n"
+                    f"✅ Yuborildi: {success}\n"
+                    f"🚫 Bloklagan: {blocked}\n"
+                    f"❌ Xato: {failed}"
+                )
+            except Exception:
+                pass
+
+        # Telegram flood limitidan himoya
+        await asyncio.sleep(0.05)
+
+    # Yakuniy hisobot
+    await progress_msg.edit_text(
+        f"📢 *E'lon yakunlandi!*\n\n"
+        f"👥 Jami: {total} ta\n"
+        f"✅ Yuborildi: {success} ta\n"
+        f"🚫 Botni bloklagan: {blocked} ta\n"
+        f"❌ Xato: {failed} ta\n\n"
+        f"📝 Xabar:\n_{broadcast_text}_",
+        parse_mode="Markdown"
+    )
+
+
 # ── /kutubxona buyrug'i ──────────────────────────────────────────
 
 async def kutubxona_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1638,6 +1720,7 @@ def main():
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("admin", admin_cmd))
     app.add_handler(CommandHandler("limit", limit_cmd))
+    app.add_handler(CommandHandler("elon", elon_cmd))
     app.add_handler(CommandHandler("kutubxona", kutubxona_cmd))
     app.add_handler(CommandHandler("davom", davom_cmd))
     app.add_handler(CommandHandler("statistika", statistika_cmd))

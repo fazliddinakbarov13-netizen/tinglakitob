@@ -125,6 +125,14 @@ def get_total_users() -> int:
     return count
 
 
+def get_all_user_ids() -> list:
+    """Barcha foydalanuvchilarning user_id larini qaytaradi (broadcast uchun)."""
+    conn = get_conn()
+    rows = conn.execute("SELECT user_id FROM users").fetchall()
+    conn.close()
+    return [row[0] for row in rows]
+
+
 # ── Konvertatsiya va kunlik limit ─────────────────────────────────
 
 def add_conversion(user_id: int, file_name: str, target_lang: str, voice: str,
